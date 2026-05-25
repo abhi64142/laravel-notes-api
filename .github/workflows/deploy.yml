@@ -21,17 +21,18 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
       # Clone repository into GitHub runner
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # Setup PHP inside runner VM
+      # Setup PHP inside GitHub runner
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
         with:
           php-version: 8.3
 
-      # Install composer dependencies
+      # Install Laravel dependencies
       - name: Install Composer Dependencies
         run: composer install --no-interaction --prefer-dist
 
@@ -40,7 +41,11 @@ jobs:
         run: |
           cp .env.example .env
 
+          touch database/database.sqlite
+
           php artisan key:generate
+
+          php artisan migrate --force
 
           php artisan config:clear
           php artisan cache:clear
@@ -55,11 +60,12 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
       # Checkout latest code
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # Setup SSH for EC2 login
+      # Setup SSH connection
       - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
@@ -70,14 +76,14 @@ jobs:
 
           ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
 
-      # Deploy application into EC2
+      # Deploy into EC2
       - name: Deploy to EC2
         run: |
           ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'EOF'
 
             cd ${{ secrets.EC2_PATH }}
 
-            git pull origin dev
+            git pull origin ${{ github.ref_name }}
 
             composer install --no-dev --optimize-autoloader
 
