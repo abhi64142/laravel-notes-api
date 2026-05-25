@@ -1,32 +1,83 @@
 name: Laravel CI/CD
 
 on:
+  pull_request:
+    branches:
+      - dev
+      - main
+
   push:
     branches:
       - dev
       - main
 
 jobs:
-  deploy:
+
+  # ==========================================
+  # BUILD & VALIDATE JOB
+  # ==========================================
+  build-and-test:
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
     runs-on: ubuntu-latest
 
     steps:
+      # Clone repository into GitHub runner
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      # Setup PHP inside runner VM
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: 8.3
+
+      # Install composer dependencies
+      - name: Install Composer Dependencies
+        run: composer install --no-interaction --prefer-dist
+
+      # Validate Laravel application
+      - name: Validate Laravel App
+        run: |
+          cp .env.example .env
+
+          php artisan key:generate
+
+          php artisan config:clear
+          php artisan cache:clear
+          php artisan route:clear
+
+  # ==========================================
+  # DEPLOY JOB
+  # ==========================================
+  deploy:
+    if: github.event_name == 'push'
+    needs: build-and-test
+    runs-on: ubuntu-latest
+
+    steps:
+      # Checkout latest code
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # Setup SSH for EC2 login
       - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
+
           echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
+
           chmod 600 ~/.ssh/id_rsa
+
           ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
 
+      # Deploy application into EC2
       - name: Deploy to EC2
         run: |
           ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'EOF'
+
             cd ${{ secrets.EC2_PATH }}
 
-            git pull origin main
+            git pull origin dev
 
             composer install --no-dev --optimize-autoloader
 
@@ -38,4 +89,5 @@ jobs:
 
             sudo systemctl restart nginx
             sudo systemctl restart php-fpm
+
           EOF
