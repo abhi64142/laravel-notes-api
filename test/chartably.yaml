@@ -1,0 +1,101 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - development
+      - qa
+      - staging
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Checkout repository
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      # Step 2: Set environment files
+      - name: Set environment files
+        run: |
+          BRANCH="${GITHUB_REF##*/}"
+          echo "Deploying for branch: $BRANCH"
+
+          if [[ "$BRANCH" == "development" ]]; then
+            cp environment/.env.development .env
+            cp nginx/nginx.development.conf nginx.conf
+          elif [[ "$BRANCH" == "qa" ]]; then
+            cp environment/.env.qa .env
+            cp nginx/nginx.qa.conf nginx.conf  
+          elif [[ "$BRANCH" == "staging" ]]; then
+            cp environment/.env.staging .env
+            cp nginx/nginx.staging.conf nginx.conf
+          elif [[ "$BRANCH" == "main" ]]; then
+            cp environment/.env.production .env
+            cp nginx/nginx.production.conf nginx.conf
+          else
+            echo "Unknown branch: $BRANCH"
+            exit 1
+          fi
+        shell: bash
+
+      # Step 3: Configure AWS credentials
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      # Step 4: Package application
+      - name: Package application
+        run: |
+          BRANCH="${GITHUB_REF##*/}"
+          TIMESTAMP=$(date +%s)
+          BUNDLE_NAME="chartably-${BRANCH}-${TIMESTAMP}.zip"
+
+          # Create deployment package with .env and nginx.conf
+          zip -r ${BUNDLE_NAME} . -x "*.git*" "venv/*" "newenv/*" "env/*" "wenv/*" ".idea/*" "*.pyc" "logs/*" "__pycache__/*"
+
+          echo "BUNDLE_NAME=${BUNDLE_NAME}" >> $GITHUB_ENV
+          echo "BRANCH=${BRANCH}" >> $GITHUB_ENV
+        shell: bash
+
+      # Step 5: Upload to S3
+      - name: Upload to S3
+        run: |
+          S3_BUCKET="chartably-deployments"
+
+          aws s3 cp ${BUNDLE_NAME} s3://${S3_BUCKET}/${BRANCH}/${BUNDLE_NAME}
+          echo "S3_BUCKET=${S3_BUCKET}" >> $GITHUB_ENV
+          echo "Uploaded to s3://${S3_BUCKET}/${BRANCH}/${BUNDLE_NAME}"
+        shell: bash
+
+      # Step 6: Create CodeDeploy deployment
+      - name: Create CodeDeploy Deployment
+        run: |
+          if [[ "$BRANCH" == "development" ]]; then
+            APP_NAME="CD-Development-ApplicationServer"
+            DG_NAME="DG-Development-ApplicationServer"
+          elif [[ "$BRANCH" == "qa" ]]; then
+            APP_NAME="CD-QA-ApplicationServer"
+            DG_NAME="DG-QA-ApplicationServer"  
+          elif [[ "$BRANCH" == "staging" ]]; then
+            APP_NAME="CD-Staging-ApplicationServer"
+            DG_NAME="DG-Staging-ApplicationServer"
+          elif [[ "$BRANCH" == "main" ]]; then
+            APP_NAME="CD-Production-ApplicationServer"
+            DG_NAME="DG-Production-ApplicationServer"
+          else
+            echo "Unknown branch: $BRANCH"
+            exit 1
+          fi
+
+          aws deploy create-deployment \
+            --application-name $APP_NAME \
+            --deployment-group-name $DG_NAME \
+            --deployment-config-name CodeDeployDefault.OneAtATime \
+            --s3-location bucket=${S3_BUCKET},key=${BRANCH}/${BUNDLE_NAME},bundleType=zip \
+            --description "Deploying branch $BRANCH"
