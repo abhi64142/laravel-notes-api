@@ -95,7 +95,8 @@ jobs:
             sleep 20
 
             docker compose exec -T app php artisan migrate --force
-            
+
             docker compose exec -T app php artisan optimize:clear
 
           EOF
+          
