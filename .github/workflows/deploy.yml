@@ -1,6 +1,6 @@
 name: Laravel CI/CD
 
-on:
+'on':
   pull_request:
     branches:
       - dev
@@ -22,36 +22,46 @@ jobs:
 
     steps:
 
+      # Checkout latest code
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      # Setup PHP
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
         with:
           php-version: 8.3
 
-      - name: Install Dependencies
+      # Install dependencies
+      - name: Install Composer Dependencies
         run: composer install --no-interaction --prefer-dist
 
+      # Setup Laravel environment
       - name: Setup Environment
         run: |
+
           cp .env.example .env
 
           touch database/database.sqlite
 
           php artisan key:generate
 
+      # Run migrations
       - name: Run Migrations
         run: php artisan migrate --force
 
-      - name: Clear Cache
+      # Clear cache
+      - name: Clear Laravel Cache
         run: |
+
           php artisan config:clear
+
           php artisan cache:clear
+
           php artisan route:clear
 
   # ==========================================
-  # DEPLOY
+  # DEPLOY TO EC2
   # ==========================================
   deploy:
 
@@ -63,40 +73,47 @@ jobs:
 
     steps:
 
+      # Checkout repository
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Setup SSH
-        run: |
-
-          mkdir -p ~/.ssh
-
-          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
-
-          chmod 600 ~/.ssh/id_rsa
-
-          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
-
+      # Deploy using SSH
       - name: Deploy to EC2
-        run: |
+        uses: appleboy/ssh-action@v1.0.3
 
-          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'EOF'
+        with:
+          host: ${{ secrets.EC2_HOST }}
+
+          username: ${{ secrets.EC2_USER }}
+
+          key: ${{ secrets.EC2_SSH_KEY }}
+
+          script: |
 
             cd ${{ secrets.EC2_PATH }}
 
+            echo "Pulling latest code..."
+
             git pull origin ${{ github.ref_name }}
+
+            echo "Stopping old containers..."
 
             docker compose down
 
+            echo "Building and starting containers..."
+
             docker compose up -d --build
 
-            echo "Waiting for MySQL..."
+            echo "Waiting for MySQL to start..."
 
             sleep 20
 
+            echo "Running migrations..."
+
             docker compose exec -T app php artisan migrate --force
+
+            echo "Clearing Laravel cache..."
 
             docker compose exec -T app php artisan optimize:clear
 
-          EOF
-          
+            echo "Deployment completed successfully!"
