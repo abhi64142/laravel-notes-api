@@ -13,61 +13,43 @@ on:
 
 jobs:
 
-  # ==========================================
-  # BUILD & TEST
-  # ==========================================
   build-and-test:
 
     runs-on: ubuntu-latest
 
     steps:
 
-      # Checkout Code
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # Setup PHP
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
         with:
           php-version: 8.3
 
-      # Install Composer Dependencies
-      - name: Install Composer Dependencies
+      - name: Install Dependencies
         run: composer install --no-interaction --prefer-dist
 
-      # Setup Laravel Environment
-      - name: Setup Laravel Environment
+      - name: Setup Laravel
         run: |
-
           cp .env.example .env
-
           touch database/database.sqlite
-
           php artisan key:generate
 
-      # Run Database Migrations
       - name: Run Migrations
         run: php artisan migrate --force
 
-      # Clear Laravel Cache
-      - name: Clear Laravel Cache
+      - name: Clear Cache
         run: |
-
           php artisan config:clear
-
           php artisan cache:clear
-
           php artisan route:clear
 
-  # ==========================================
-  # DEPLOY
-  # ==========================================
   deploy:
 
-    if: github.event_name == 'push'
-
     needs: build-and-test
+
+    if: github.event_name == 'push'
 
     runs-on: ubuntu-latest
 
@@ -78,38 +60,21 @@ jobs:
 
         with:
           host: ${{ secrets.EC2_HOST }}
-
           username: ${{ secrets.EC2_USER }}
-
           key: ${{ secrets.EC2_SSH_KEY }}
 
           script: |
 
             cd ${{ secrets.EC2_PATH }}
 
-            echo "Pulling latest code..."
-
             git pull origin dev
-
-            echo "Stopping old containers..."
 
             docker compose down
 
-            echo "Building new containers..."
-
             docker compose up -d --build
-
-            echo "Waiting for MySQL..."
 
             sleep 20
 
-            echo "Running migrations..."
-
             docker compose exec -T app php artisan migrate --force
 
-            echo "Clearing Laravel cache..."
-
             docker compose exec -T app php artisan optimize:clear
-
-            echo "Deployment completed successfully!"
-            
