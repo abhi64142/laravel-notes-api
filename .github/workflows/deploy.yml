@@ -14,30 +14,26 @@ on:
 jobs:
 
   # ==========================================
-  # BUILD & VALIDATE JOB
+  # BUILD & TEST
   # ==========================================
   build-and-test:
-    if: github.event_name == 'pull_request' || github.event_name == 'push'
+
     runs-on: ubuntu-latest
 
     steps:
 
-      # Clone repository into GitHub runner
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # Setup PHP inside GitHub runner
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
         with:
           php-version: 8.3
 
-      # Install Laravel dependencies
-      - name: Install Composer Dependencies
+      - name: Install Dependencies
         run: composer install --no-interaction --prefer-dist
 
-      # Validate Laravel application
-      - name: Validate Laravel App
+      - name: Setup Environment
         run: |
           cp .env.example .env
 
@@ -45,29 +41,34 @@ jobs:
 
           php artisan key:generate
 
-          php artisan migrate --force
+      - name: Run Migrations
+        run: php artisan migrate --force
 
+      - name: Clear Cache
+        run: |
           php artisan config:clear
           php artisan cache:clear
           php artisan route:clear
 
   # ==========================================
-  # DEPLOY JOB
+  # DEPLOY
   # ==========================================
   deploy:
+
     if: github.event_name == 'push'
+
     needs: build-and-test
+
     runs-on: ubuntu-latest
 
     steps:
 
-      # Checkout latest code
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # Setup SSH connection
       - name: Setup SSH
         run: |
+
           mkdir -p ~/.ssh
 
           echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
@@ -76,24 +77,21 @@ jobs:
 
           ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
 
-      # Deploy into EC2
       - name: Deploy to EC2
         run: |
+
           ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'EOF'
 
             cd ${{ secrets.EC2_PATH }}
 
             git pull origin ${{ github.ref_name }}
 
-            composer install --no-dev --optimize-autoloader
+            docker compose down
 
-            php artisan migrate --force
+            docker compose up -d --build
 
-            php artisan config:clear
-            php artisan cache:clear
-            php artisan route:clear
+            docker compose exec -T app php artisan migrate --force
 
-            sudo systemctl restart nginx
-            sudo systemctl restart php-fpm
+            docker compose exec -T app php artisan optimize:clear
 
           EOF
