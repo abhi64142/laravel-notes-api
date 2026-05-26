@@ -112,3 +112,4 @@ jobs:
             docker compose exec -T app php artisan optimize:clear
 
             echo "Deployment completed successfully!"
+            
