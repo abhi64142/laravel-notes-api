@@ -90,8 +90,12 @@ jobs:
 
             docker compose up -d --build
 
-            docker compose exec -T app php artisan migrate --force
+            echo "Waiting for MySQL..."
 
+            sleep 20
+
+            docker compose exec -T app php artisan migrate --force
+            
             docker compose exec -T app php artisan optimize:clear
 
           EOF
