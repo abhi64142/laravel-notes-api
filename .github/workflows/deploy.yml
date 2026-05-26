@@ -1,68 +1,50 @@
 name: Laravel CI/CD
 
-'on':
-  pull_request:
+on:
+  push:
     branches:
       - dev
       - main
 
-  push:
+  pull_request:
     branches:
       - dev
       - main
 
 jobs:
 
-  # ==========================================
-  # BUILD & TEST
-  # ==========================================
   build-and-test:
 
     runs-on: ubuntu-latest
 
     steps:
 
-      # Checkout latest code
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # Setup PHP
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
         with:
           php-version: 8.3
 
-      # Install dependencies
       - name: Install Composer Dependencies
         run: composer install --no-interaction --prefer-dist
 
-      # Setup Laravel environment
-      - name: Setup Environment
+      - name: Setup Laravel Environment
         run: |
-
           cp .env.example .env
-
           touch database/database.sqlite
-
           php artisan key:generate
 
-      # Run migrations
       - name: Run Migrations
         run: php artisan migrate --force
 
-      # Clear cache
       - name: Clear Laravel Cache
         run: |
-
           php artisan config:clear
-
           php artisan cache:clear
-
           php artisan route:clear
 
-  # ==========================================
-  # DEPLOY TO EC2
-  # ==========================================
   deploy:
 
     if: github.event_name == 'push'
@@ -73,47 +55,28 @@ jobs:
 
     steps:
 
-      # Checkout repository
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      # Deploy using SSH
       - name: Deploy to EC2
         uses: appleboy/ssh-action@v1.0.3
 
         with:
           host: ${{ secrets.EC2_HOST }}
-
           username: ${{ secrets.EC2_USER }}
-
           key: ${{ secrets.EC2_SSH_KEY }}
 
           script: |
 
             cd ${{ secrets.EC2_PATH }}
 
-            echo "Pulling latest code..."
-
             git pull origin ${{ github.ref_name }}
-
-            echo "Stopping old containers..."
 
             docker compose down
 
-            echo "Building and starting containers..."
-
             docker compose up -d --build
 
-            echo "Waiting for MySQL to start..."
+            echo "Waiting for MySQL..."
 
             sleep 20
 
-            echo "Running migrations..."
-
             docker compose exec -T app php artisan migrate --force
 
-            echo "Clearing Laravel cache..."
-
             docker compose exec -T app php artisan optimize:clear
-
-            echo "Deployment completed successfully!"
