@@ -1,0 +1,67 @@
+services:
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: notes-api-app
+
+    restart: unless-stopped
+
+    working_dir: /var/www
+
+    volumes:
+      - ./:/var/www
+
+    networks:
+      - notes-network
+
+
+  nginx:
+    image: nginx:alpine
+
+    container_name: notes-api-nginx
+
+    restart: unless-stopped
+
+    ports:
+      - "80:80"
+
+    volumes:
+      - ./:/var/www
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf
+
+    depends_on:
+      - app
+
+    networks:
+      - notes-network
+
+
+  mysql:
+    image: mysql:8
+
+    container_name: notes-api-mysql
+
+    restart: unless-stopped
+
+    environment:
+      MYSQL_DATABASE: notes_api
+      MYSQL_ROOT_PASSWORD: 12345
+      MYSQL_USER: laravel
+      MYSQL_PASSWORD: 12345
+
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+    networks:
+      - notes-network
+
+
+networks:
+  notes-network:
+
+
+volumes:
+  mysql_data:

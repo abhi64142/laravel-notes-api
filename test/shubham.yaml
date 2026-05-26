@@ -1,0 +1,281 @@
+name: Application Deployment Workflow
+
+on:
+  pull_request:
+    branches:
+      - main
+      - 'release/**'
+    types: [opened, synchronize, reopened]
+
+  push:
+    branches:
+      - main
+      - 'release/**'
+    tags:
+      - 'v*'
+
+env:
+  NODE_VERSION: "24.11.1"
+
+jobs:
+
+# ==================================================
+# 1️⃣ BUILD & TEST (PR ONLY)
+# ==================================================
+  build-n-test:
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # Detect changes via PR API
+      - name: Detect Backend Changes
+        uses: dorny/paths-filter@v3
+        id: backend
+        with:
+          filters: |
+            backend:
+              - 'apps/backend/**'
+
+      - name: Detect Frontend Changes
+        uses: dorny/paths-filter@v3
+        id: frontend
+        with:
+          filters: |
+            frontend:
+              - 'apps/frontend/**'
+
+      - name: Test Backend
+        if: steps.backend.outputs.backend == 'true'
+        run: |
+          cd apps/backend
+          npm install
+          npx prisma generate
+          npm run build
+
+      - name: Test Frontend
+        if: steps.frontend.outputs.frontend == 'true'
+        run: |
+          cd apps/frontend
+          npm install
+          npm run build
+
+
+# ==================================================
+# 2️⃣ DEPLOY BACKEND (Runs in parallel with Frontend)
+# ==================================================
+  deploy-backend:
+    if: github.event_name == 'push' 
+    needs: build-n-test
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_type == 'tag' && startsWith(github.ref_name, 'v') && 'production' || github.ref == 'refs/heads/main' && 'develop' || startsWith(github.ref, 'refs/heads/release/') && 'staging' }}
+
+    steps:
+      - uses: actions/checkout@v5
+        with: 
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Determine branch and set variables
+        id: set-vars
+        run: |
+          echo "GITHUB_REF_TYPE=$GITHUB_REF_TYPE"
+          echo "GITHUB_REF_NAME=$GITHUB_REF_NAME"
+          if [ "$GITHUB_REF_TYPE" = "branch" ] && [ "$GITHUB_REF_NAME" = "main" ]; then
+            echo "ENVIRONMENT=dev" >> $GITHUB_ENV
+            echo "INFRA_ROLE_ARN=${{ secrets.GIT_INFRA_ROLE_ARN }}" >> $GITHUB_ENV
+            echo "AWS_ACCESS_KEY_ID=${{ secrets.ORG_NONPROD_AWS_ACCESS_KEY_ID }}" >> $GITHUB_ENV
+            echo "AWS_SECRET_ACCESS_KEY=${{ secrets.ORG_NONPROD_AWS_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
+          elif [ "$GITHUB_REF_TYPE" = "branch" ] && [[ "$GITHUB_REF_NAME" == release/* ]]; then
+            echo "ENVIRONMENT=stg" >> $GITHUB_ENV
+            echo "INFRA_ROLE_ARN=${{ secrets.GIT_INFRA_ROLE_ARN }}" >> $GITHUB_ENV
+            echo "AWS_ACCESS_KEY_ID=${{ secrets.ORG_NONPROD_AWS_ACCESS_KEY_ID }}" >> $GITHUB_ENV
+            echo "AWS_SECRET_ACCESS_KEY=${{ secrets.ORG_NONPROD_AWS_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
+          elif [ "$GITHUB_REF_TYPE" = "tag" ] && [[ "$GITHUB_REF_NAME" == v* ]]; then
+            echo "ENVIRONMENT=prod" >> $GITHUB_ENV
+            echo "INFRA_ROLE_ARN=${{ secrets.GIT_INFRA_ROLE_ARN }}" >> $GITHUB_ENV
+            echo "AWS_ACCESS_KEY_ID=${{ secrets.ORG_PROD_AWS_ACCESS_KEY_ID }}" >> $GITHUB_ENV
+            echo "AWS_SECRET_ACCESS_KEY=${{ secrets.ORG_PROD_AWS_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
+          else
+            exit 1
+          fi
+
+      - name: Detect Backend Changes
+        uses: dorny/paths-filter@v3
+        id: backend
+        with:
+          filters: |
+            backend:
+              - 'apps/backend/**'
+
+      - name: Generate timestamp
+        id: timestamp
+        run: echo "time=$(date -u +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
+
+      - name: Inject Environment Variables into EB Config
+        if: steps.backend.outputs.backend == 'true' || startsWith(github.ref, 'refs/heads/release/') || github.ref_type == 'tag'
+        shell: bash
+        env:
+          ALLOWED_ORIGINS: ${{ vars.ALLOWED_ORIGINS }}
+          AWS_REGION: ${{ vars.REGION  }}
+          AWS_SECRET_NAME: ${{ vars.AWS_SECRET_NAME }}
+          COGNITO_USER_POOL_ID: ${{ vars.COGNITO_USER_POOL_ID }}
+          DATABASE_HOST: ${{ vars.DATABASE_HOST }}
+          DATABASE_NAME:  ${{ vars.DATABASE_NAME }}
+          GET_MEMBER_URL: ${{ vars.GET_MEMBER_URL }}
+          M2M_CLIENT_SECRET_NAME: ${{ vars.M2M_CLIENT_SECRET_NAME }}
+          POST_TOKEN_URL: ${{ vars.POST_TOKEN_URL }}
+          SCOPE: ${{ vars.SCOPE }}
+          USER_INFO_URL: ${{ vars.USER_INFO_URL }}
+        run: |
+          # Replace vars in template and create the actual config file
+          envsubst < apps/backend/.ebextensions/env.config.template > apps/backend/.ebextensions/env.config
+        
+      - name: Build Backend
+        if: steps.backend.outputs.backend == 'true' || startsWith(github.ref, 'refs/heads/release/') || github.ref_type == 'tag'
+        run: |
+          cd apps/backend
+          npm install
+          npx prisma generate
+          npm run build
+          zip -r dang-backend-${{ env.ENVIRONMENT }}.zip -@ < files_to_deploy.list
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.INFRA_ROLE_ARN }}
+          aws-region: ${{ vars.REGION }}
+          aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Deploy Backend
+        if: steps.backend.outputs.backend == 'true' || startsWith(github.ref, 'refs/heads/release/') || github.ref_type == 'tag'
+        uses: einaregilsson/beanstalk-deploy@v21
+        with:
+          aws_access_key: ${{ env.AWS_ACCESS_KEY_ID }}
+          aws_secret_key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+          aws_session_token: ${{ env.AWS_SESSION_TOKEN }}
+          existing_bucket_name: ${{ vars.DEPLOY_BUCKET }}
+          application_name: aia-usnv-dang-${{ env.ENVIRONMENT }}-be
+          environment_name: aia-usnv-dang-${{ env.ENVIRONMENT }}-be-env
+          region: ${{ vars.REGION }}
+          version_label: "be-${{ env.ENVIRONMENT }}-${{ steps.timestamp.outputs.time }}"
+          deployment_package: apps/backend/dang-backend-${{ env.ENVIRONMENT }}.zip
+          use_existing_version_if_available: true
+
+
+# ==================================================
+# 3️⃣ DEPLOY FRONTEND (Runs in parallel with Backend)
+# ==================================================
+  deploy-frontend:
+    if: github.event_name == 'push' 
+    needs: build-n-test
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_type == 'tag' && startsWith(github.ref_name, 'v') && 'production' || github.ref == 'refs/heads/main' && 'develop' || startsWith(github.ref, 'refs/heads/release/') && 'staging' }}
+
+    steps:
+      - uses: actions/checkout@v5
+        with: 
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Determine branch and set variables
+        id: set-vars
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "branch" ] && [ "$GITHUB_REF_NAME" = "main" ]; then
+            echo "ENVIRONMENT=dev" >> $GITHUB_ENV
+            echo "INFRA_ROLE_ARN=${{ secrets.GIT_INFRA_ROLE_ARN }}" >> $GITHUB_ENV
+            echo "AWS_ACCESS_KEY_ID=${{ secrets.ORG_NONPROD_AWS_ACCESS_KEY_ID }}" >> $GITHUB_ENV
+            echo "AWS_SECRET_ACCESS_KEY=${{ secrets.ORG_NONPROD_AWS_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
+          elif [ "$GITHUB_REF_TYPE" = "branch" ] && [[ "$GITHUB_REF_NAME" == release/* ]]; then
+            echo "ENVIRONMENT=stg" >> $GITHUB_ENV
+            echo "INFRA_ROLE_ARN=${{ secrets.GIT_INFRA_ROLE_ARN }}" >> $GITHUB_ENV
+            echo "AWS_ACCESS_KEY_ID=${{ secrets.ORG_NONPROD_AWS_ACCESS_KEY_ID }}" >> $GITHUB_ENV
+            echo "AWS_SECRET_ACCESS_KEY=${{ secrets.ORG_NONPROD_AWS_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
+          elif [ "$GITHUB_REF_TYPE" = "tag" ] && [[ "$GITHUB_REF_NAME" == v* ]]; then
+            echo "ENVIRONMENT=prod" >> $GITHUB_ENV
+            echo "INFRA_ROLE_ARN=${{ secrets.GIT_INFRA_ROLE_ARN }}" >> $GITHUB_ENV
+            echo "AWS_ACCESS_KEY_ID=${{ secrets.ORG_PROD_AWS_ACCESS_KEY_ID }}" >> $GITHUB_ENV
+            echo "AWS_SECRET_ACCESS_KEY=${{ secrets.ORG_PROD_AWS_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
+          else
+            exit 1
+          fi
+
+      - name: Detect Frontend Changes
+        uses: dorny/paths-filter@v3
+        id: frontend
+        with:
+          filters: |
+            frontend:
+              - 'apps/frontend/**'
+
+      - name: Generate timestamp
+        id: timestamp
+        run: echo "time=$(date -u +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
+
+      - name: Inject Environment Variables into EB Config
+        if: steps.frontend.outputs.frontend == 'true' || startsWith(github.ref, 'refs/heads/release/') || github.ref_type == 'tag'
+        shell: bash
+        env:
+          NEXT_PUBLIC_API_ENDPOINT_ORG: ${{ vars.NEXT_PUBLIC_API_ENDPOINT_ORG }}
+          NEXT_PUBLIC_APP_URL: ${{ vars.NEXT_PUBLIC_APP_URL }}
+          NEXT_PUBLIC_ULNG_BASE_URL: ${{ vars.NEXT_PUBLIC_ULNG_BASE_URL }}
+          NEXT_PUBLIC_ULNG_CLIENT_ID: ${{ vars.NEXT_PUBLIC_ULNG_CLIENT_ID }}
+          NEXT_PUBLIC_ULNG_CLIENT_SECRET_NAME: ${{ vars.NEXT_PUBLIC_ULNG_CLIENT_SECRET_NAME }}
+          NEXT_PUBLIC_ULNG_REDIRECT_URI: ${{ vars.NEXT_PUBLIC_ULNG_REDIRECT_URI }}
+        run: |
+          envsubst < apps/frontend/.ebextensions/env.config.template > apps/frontend/.ebextensions/env.config
+
+      - name: Build Frontend
+        if: steps.frontend.outputs.frontend == 'true' || startsWith(github.ref, 'refs/heads/release/') || github.ref_type == 'tag'
+        run: |
+          cd apps/frontend
+          npm install
+          if [[ "${{ env.ENVIRONMENT }}" == "dev" ]]; then
+            rm -f .env.production.local
+            mv .env.development.local .env.production.local
+          elif [[ "${{ env.ENVIRONMENT }}" == "stg" ]]; then
+            rm -f .env.production.local
+            mv .env.stage.local .env.production.local
+          elif [[ "${{ env.ENVIRONMENT }}" == "prod" ]]; then
+            echo "Using existing .env.production.local for production"
+          fi
+          npm run build
+          zip -r dang-frontend-${{ env.ENVIRONMENT }}.zip -@ < files_to_deploy.list
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.INFRA_ROLE_ARN }}
+          aws-region: ${{ vars.REGION }}
+          aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Deploy Frontend
+        if: steps.frontend.outputs.frontend == 'true' || startsWith(github.ref, 'refs/heads/release/') || github.ref_type == 'tag'
+        uses: einaregilsson/beanstalk-deploy@v21
+        with:
+          aws_access_key: ${{ env.AWS_ACCESS_KEY_ID }}
+          aws_secret_key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+          aws_session_token: ${{ env.AWS_SESSION_TOKEN }}
+          existing_bucket_name: ${{ vars.DEPLOY_BUCKET }}
+          application_name: aia-usnv-dang-${{ env.ENVIRONMENT }}-fe
+          environment_name: aia-usnv-dang-${{ env.ENVIRONMENT }}-fe-env
+          region: ${{ vars.REGION }}
+          version_label: "fe-${{ env.ENVIRONMENT }}-${{ steps.timestamp.outputs.time }}"
+          deployment_package: apps/frontend/dang-frontend-${{ env.ENVIRONMENT }}.zip
+          use_existing_version_if_available: true
