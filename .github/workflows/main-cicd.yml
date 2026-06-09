@@ -2,7 +2,7 @@ name: Laravel DockerHub CI/CD
 
 on:
 
-  # Auto run when code is pushed to dev
+  # Auto run when code is pushed to dev 
   push:
     branches:
       - dev
